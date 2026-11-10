@@ -701,8 +701,8 @@
 
   <script id="embeddedQuizScript">
     window.__EMBEDDED_QUIZ_RAW__ = null;
-    window.__EMBEDDED_BUILD_ID__ = "source_build_1794337263451";
-    window.__EMBEDDED_PUBLISHED_HUB__ = {"folders":["General"],"quizzes":[],"deletedQuizIds":[],"deletedFolders":[]};
+    window.__EMBEDDED_BUILD_ID__ = "source_build_1794337869244";
+    window.__EMBEDDED_PUBLISHED_HUB__ = {"buildId":"source_build_1794337869244","folders":["General"],"quizzes":[],"deletedQuizIds":[],"deletedFolders":[]};
   </script>
 
   <script id="mainAppLogicScript">
@@ -721,11 +721,11 @@
     let correctAttempts = 0;
     let answeredCurrent = false;
 
-    // Creator Publish Password & Hub State (Dynamic Build Key so every new export gets a clean slate!)
+    // Creator Publish Password & Hub State
     const CREATOR_PASSCODE = '6769';
-    const CURRENT_BUILD_ID = window.__EMBEDDED_BUILD_ID__ || 'source_fresh_1';
-    const STORAGE_KEY_PUBLISHED_HUB = 'quiz_master_source_hub_' + CURRENT_BUILD_ID;
-    const STORAGE_KEY_HUB_COLLAPSED = 'quiz_master_source_collapsed_' + CURRENT_BUILD_ID;
+    const CURRENT_BUILD_ID = window.__EMBEDDED_BUILD_ID__ || 'source_fresh_2';
+    const STORAGE_KEY_PUBLISHED_HUB = 'quiz_master_source_hub_v2';
+    const STORAGE_KEY_HUB_COLLAPSED = 'quiz_master_source_collapsed_v2';
     let isCreatorUnlocked = false;
     let pendingCreatorAction = null;
     let activeFolderFilter = 'ALL';
@@ -751,8 +751,8 @@
     let hardPoolHistory = new Set();
     let incorrectPoolHistory = new Set();
 
-    // LocalStorage Key for On-Device Saved Quizzes (Fresh per build)
-    const STORAGE_KEY_LIBRARY = 'quiz_master_source_lib_' + CURRENT_BUILD_ID;
+    // LocalStorage Key for On-Device Saved Quizzes
+    const STORAGE_KEY_LIBRARY = 'quiz_master_source_lib_v2';
 
     // DOM Elements
     const uploadScreen = document.getElementById('uploadScreen');
@@ -985,7 +985,8 @@
           folderSet.add(folderName);
         }
       });
-      if (localHub && Array.isArray(localHub.quizzes)) {
+      const localBuildId = localHub && localHub.buildId;
+      if (localHub && Array.isArray(localHub.quizzes) && (!embedded.quizzes || embedded.quizzes.length > 0 || localBuildId === CURRENT_BUILD_ID)) {
         localHub.quizzes.forEach(q => {
           if (q && q.id && !deletedQuizIds.has(q.id)) {
             const folderName = (!q.folder || deletedFolders.has(q.folder)) ? 'General' : q.folder;
@@ -996,6 +997,7 @@
       }
 
       publishedHubData = {
+        buildId: CURRENT_BUILD_ID,
         folders: Array.from(folderSet),
         quizzes: Array.from(quizMap.values()),
         deletedQuizIds: Array.from(deletedQuizIds),
@@ -1016,8 +1018,18 @@
 
     function savePublishedHubToStorage() {
       try {
+        publishedHubData.buildId = CURRENT_BUILD_ID;
         localStorage.setItem(STORAGE_KEY_PUBLISHED_HUB, JSON.stringify(publishedHubData));
       } catch (e) {}
+    }
+
+    // Safe JSON serializer for embedding inside HTML <script> tags
+    function serializeForInlineScript(obj) {
+      return JSON.stringify(obj)
+        .replace(/</g, '\\u003c')
+        .replace(/>/g, '\\u003e')
+        .replace(/\u2028/g, '\\u2028')
+        .replace(/\u2029/g, '\\u2029');
     }
 
     function requireCreatorAuth(actionCallback, promptMessage) {
@@ -1273,7 +1285,7 @@
       const reader = new FileReader();
       reader.onload = (evt) => {
         const htmlText = evt.target.result || '';
-        const match = htmlText.match(/window\.__EMBEDDED_PUBLISHED_HUB__\s*=\s*(\{[\s\S]*?\});\s*<\/script>/);
+        const match = htmlText.match(/window\.__EMBEDDED_PUBLISHED_HUB__\s*=\s*(\{[\s\S]*?\});\s*(?:window\.|<\/script>)/);
         if (!match) {
           showToast('Could not find published hub data inside that HTML file.', 'fa-solid fa-circle-exclamation text-rose-400');
           return;
@@ -1657,9 +1669,10 @@
       }
       const scriptEl = cloneDoc.querySelector('#embeddedQuizScript');
       if (scriptEl) {
-        const serializedQuiz = JSON.stringify(rawQuizText).replace(/<\/script>/gi, '<\\/script>');
-        const serializedHub = JSON.stringify(publishedHubData).replace(/<\/script>/gi, '<\\/script>');
         const nextBuildId = 'source_build_' + Date.now();
+        const hubSnapshot = { ...publishedHubData, buildId: nextBuildId };
+        const serializedQuiz = serializeForInlineScript(rawQuizText);
+        const serializedHub = serializeForInlineScript(hubSnapshot);
         scriptEl.textContent = `\n    window.__EMBEDDED_QUIZ_RAW__ = ${serializedQuiz};\n    window.__EMBEDDED_BUILD_ID__ = "${nextBuildId}";\n    window.__EMBEDDED_PUBLISHED_HUB__ = ${serializedHub};\n  `;
       }
 
@@ -1700,6 +1713,33 @@
 
     // Export clean HTML file with a specified filename ("index.html" or "Quiz source file.html")
     function exportAppHtmlFile(targetFilename = 'index.html') {
+      // Auto-publish any staged batch files if the user forgot to click "Confirm & Publish" first!
+      const validBatchItems = stagedBatchFiles.filter(f => f.count > 0);
+      if (validBatchItems.length > 0) {
+        const folder = activeFolderFilter !== 'ALL' ? activeFolderFilter : 'General';
+        if (!publishedHubData.folders.includes(folder)) {
+          publishedHubData.folders.push(folder);
+        }
+        validBatchItems.slice().reverse().forEach((item, idx) => {
+          const finalTitle = item.title.trim() || stripTxtExtension(item.fileName);
+          publishedHubData.quizzes.unshift({
+            id: 'pub_' + Date.now() + '_' + idx,
+            title: finalTitle,
+            folder: folder,
+            count: item.count,
+            date: new Date().toLocaleDateString(),
+            rawText: item.rawText.trim()
+          });
+        });
+        stagedBatchFiles = [];
+        activeBatchFileId = null;
+        rawTextInput.value = '';
+        updateParseStatus();
+        renderBatchFilesList();
+        savePublishedHubToStorage();
+        renderPublishedHub();
+      }
+
       const cloneDoc = document.documentElement.cloneNode(true);
       const clonedToast = cloneDoc.querySelector('#toastNotification');
       if (clonedToast) clonedToast.classList.add('hidden');
@@ -1723,8 +1763,9 @@
 
       const scriptEl = cloneDoc.querySelector('#embeddedQuizScript');
       if (scriptEl) {
-        const serializedHub = JSON.stringify(publishedHubData).replace(/<\/script>/gi, '<\\/script>');
         const nextBuildId = 'source_build_' + Date.now();
+        const hubSnapshot = { ...publishedHubData, buildId: nextBuildId };
+        const serializedHub = serializeForInlineScript(hubSnapshot);
         scriptEl.textContent = `\n    window.__EMBEDDED_QUIZ_RAW__ = null;\n    window.__EMBEDDED_BUILD_ID__ = "${nextBuildId}";\n    window.__EMBEDDED_PUBLISHED_HUB__ = ${serializedHub};\n  `;
       }
       cloneDoc.querySelectorAll('script').forEach(s => {
@@ -1742,7 +1783,7 @@
       a.click();
       document.body.removeChild(a);
       URL.revokeObjectURL(url);
-      showToast(`Downloaded "${targetFilename}"!`, 'fa-solid fa-circle-check text-emerald-400');
+      showToast(`Downloaded "${targetFilename}" with ${publishedHubData.quizzes.length} Published Quiz(zes)!`, 'fa-solid fa-circle-check text-emerald-400');
     }
 
     // Toggle Cleaning Phase on/off in Hard Mode
